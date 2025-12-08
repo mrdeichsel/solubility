@@ -1,0 +1,396 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Solubility Rules Quiz</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Use Inter font -->
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap');
+        body { font-family: 'Inter', sans-serif; background-color: #f7f9fb; }
+        .compound-display {
+            font-size: 2.5rem;
+            font-weight: 700;
+            line-height: 1.2;
+            color: #1f2937;
+        }
+    </style>
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, setDoc, getDoc, onSnapshot } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // Set Firebase log level for debugging
+        setLogLevel('Debug');
+
+        // --- GLOBAL FIREBASE VARIABLES (MANDATORY) ---
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-solubility-app-id';
+        const firebaseConfig = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}');
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+        // --- END GLOBAL FIREBASE VARIABLES ---
+
+        // Initialize Firebase
+        let app, db, auth, userId = null;
+        let userScore = 0;
+        let highScore = 0;
+        let isAuthReady = false;
+
+        // Quiz Data Structure (Now 39 compounds)
+        const compounds = [
+            // Original 10 Compounds (CaSO4 removed)
+            { formula: 'NaCl', soluble: true, rule: 'Rule 1: Group 1 compounds are soluble.' },
+            { formula: 'AgCl', soluble: false, rule: 'Rule 3 Exception: Chlorides are soluble, except for $\\text{Ag}^{+}$, $\\text{Pb}^{2+}$, and $\\text{Hg}_{2}^{2+}$.' },
+            { formula: 'Pb(NO_3)_2', soluble: true, rule: 'Rule 2: Nitrates $\\text{NO}_{3}^{-}$ are always soluble.' },
+            { formula: 'BaSO_4', soluble: false, rule: 'Rule 4 Exception: Sulfates $\\text{SO}_{4}^{2-}$ are soluble, except for $\\text{Ba}^{2+}$, $\\text{Sr}^{2+}$, and $\\text{Pb}^{2+}$.' },
+            { formula: 'K_3PO_4', soluble: true, rule: 'Rule 1: Group 1 compounds are soluble. This overrides Rule 6 for phosphates.' },
+            { formula: 'CaCO_3', soluble: false, rule: 'Rule 6 Exception: Carbonates $\\text{CO}_{3}^{2-}$ are insoluble, except for Group 1 and $\\text{NH}_{4}^{+}$ compounds.' },
+            { formula: 'NH_4OH', soluble: true, rule: 'Rule 1: Ammonium $\\text{NH}_{4}^{+}$ compounds are always soluble.' },
+            { formula: 'Mg(OH)_2', soluble: false, rule: 'Rule 5 Exception: Hydroxides $\\text{OH}^{-}$ are insoluble, except for Group 1, $\\text{Ca}^{2+}$, $\\text{Sr}^{2+}$, and $\\text{Ba}^{2+}$.' },
+            { formula: 'Li_2S', soluble: true, rule: 'Rule 1: Group 1 compounds are soluble. This overrides Rule 6 for sulfides.' },
+            { formula: 'CuS', soluble: false, rule: 'Rule 6 Exception: Sulfides $\\text{S}^{2-}$ are insoluble, except for Group 1, $\\text{NH}_{4}^{+}$, and Group 2 compounds.' },
+            
+            // 30 New Compounds
+            // Rule 1 & 2 (Always Soluble: Group 1, NH4+, NO3-)
+            { formula: 'Na_2CO_3', soluble: true, rule: 'Rule 1: Group 1 compounds are soluble, overriding the carbonate rule.' },
+            { formula: 'NH_4Cl', soluble: true, rule: 'Rule 1: Ammonium $\\text{NH}_{4}^{+}$ compounds are always soluble.' },
+            { formula: 'LiI', soluble: true, rule: 'Rule 1: Group 1 compounds are soluble.' },
+            { formula: 'K_2CrO_4', soluble: true, rule: 'Rule 1: Group 1 compounds are soluble.' },
+            { formula: 'RbOH', soluble: true, rule: 'Rule 1: Group 1 compounds are soluble, overriding the hydroxide rule.' },
+            { formula: 'Cu(NO_3)_2', soluble: true, rule: 'Rule 2: Nitrates $\\text{NO}_{3}^{-}$ are always soluble.' },
+            { formula: 'Al(NO_3)_3', soluble: true, rule: 'Rule 2: Nitrates $\\text{NO}_{3}^{-}$ are always soluble.' },
+            { formula: 'Fe(NO_3)_3', soluble: true, rule: 'Rule 2: Nitrates $\\text{NO}_{3}^{-}$ are always soluble.' },
+            { formula: 'Ni(NO_3)_2', soluble: true, rule: 'Rule 2: Nitrates $\\text{NO}_{3}^{-}$ are always soluble.' },
+            { formula: 'Ca(NO_3)_2', soluble: true, rule: 'Rule 2: Nitrates $\\text{NO}_{3}^{-}$ are always soluble.' },
+
+            // Rule 3 (Halides: Cl-, Br-, I- Exceptions)
+            { formula: 'FeBr_2', soluble: true, rule: 'Rule 3: Bromides $\\text{Br}^{-}$ are generally soluble.' },
+            { formula: 'ZnI_2', soluble: true, rule: 'Rule 3: Iodides $\\text{I}^{-}$ are generally soluble.' },
+            { formula: 'Hg_2Cl_2', soluble: false, rule: 'Rule 3 Exception: Chlorides are insoluble with $\\text{Hg}_{2}^{2+}$ (mercury(I)).' },
+            { formula: 'PbBr_2', soluble: false, rule: 'Rule 3 Exception: Bromides are insoluble with $\\text{Pb}^{2+}$.' },
+            { formula: 'CuCl_2', soluble: true, rule: 'Rule 3: Chlorides $\\text{Cl}^{-}$ are generally soluble.' },
+            
+            // Rule 4 (Sulfate: SO4(2-) Exceptions)
+            { formula: 'FeSO_4', soluble: true, rule: 'Rule 4: Sulfates $\\text{SO}_{4}^{2-}$ are generally soluble.' },
+            // Removed: { formula: 'CaSO_4', soluble: false, rule: 'Rule 4 Exception: Sulfates are insoluble with $\\text{Ca}^{2+}$, $\\text{Sr}^{2+}$, and $\\text{Ba}^{2+}$.' },
+            { formula: 'SrSO_4', soluble: false, rule: 'Rule 4 Exception: Sulfates are insoluble with $\\text{Sr}^{2+}$.' },
+            { formula: 'Al_2(SO_4)_3', soluble: true, rule: 'Rule 4: Sulfates $\\text{SO}_{4}^{2-}$ are generally soluble.' },
+            { formula: 'CuSO_4', soluble: true, rule: 'Rule 4: Sulfates $\\text{SO}_{4}^{2-}$ are generally soluble.' },
+
+            // Rule 5 (Hydroxide: OH- Exceptions)
+            { formula: 'Fe(OH)_3', soluble: false, rule: 'Rule 5: Hydroxides $\\text{OH}^{-}$ are insoluble (not Group 1, $\\text{Ca}^{2+}$, $\\text{Sr}^{2+}$, or $\\text{Ba}^{2+}$).' },
+            { formula: 'Ni(OH)_2', soluble: false, rule: 'Rule 5: Hydroxides $\\text{OH}^{-}$ are insoluble.' },
+            { formula: 'Ca(OH)_2', soluble: true, rule: 'Rule 5 Exception: Calcium hydroxide is one of the few soluble hydroxides.' },
+            { formula: 'Sr(OH)_2', soluble: true, rule: 'Rule 5 Exception: Strontium hydroxide is one of the few soluble hydroxides.' },
+            { formula: 'Al(OH)_3', soluble: false, rule: 'Rule 5: Hydroxides $\\text{OH}^{-}$ are insoluble.' },
+
+            // Rule 6 (Insoluble: S(2-), CO3(2-), PO4(3-) Exceptions)
+            { formula: 'Ag_2S', soluble: false, rule: 'Rule 6: Sulfides $\\text{S}^{2-}$ are generally insoluble (not Group 1, $\\text{NH}_{4}^{+}$, or Group 2).' },
+            { formula: 'FeCO_3', soluble: false, rule: 'Rule 6: Carbonates $\\text{CO}_{3}^{2-}$ are generally insoluble.' },
+            { formula: 'Ca_3(PO_4)_2', soluble: false, rule: 'Rule 6: Phosphates $\\text{PO}_{4}^{3-}$ are generally insoluble.' },
+            { formula: 'ZnS', soluble: false, rule: 'Rule 6: Sulfides $\\text{S}^{2-}$ are generally insoluble.' },
+            { formula: 'BaCO_3', soluble: false, rule: 'Rule 6: Carbonates $\\text{CO}_{3}^{2-}$ are generally insoluble.' },
+            { formula: 'PbCO_3', soluble: false, rule: 'Rule 6: Carbonates $\\text{CO}_{3}^{2-}$ are generally insoluble.' },
+            { formula: 'Fe_2S_3', soluble: false, rule: 'Rule 6: Sulfides $\\text{S}^{2-}$ are generally insoluble.' },
+            { formula: 'MgCO_3', soluble: false, rule: 'Rule 6: Carbonates $\\text{CO}_{3}^{2-}$ are generally insoluble.' },
+            { formula: 'Ag_3PO_4', soluble: false, rule: 'Rule 6: Phosphates $\\text{PO}_{4}^{3-}$ are generally insoluble.' },
+            { formula: 'Ba_3(PO_4)_2', soluble: false, rule: 'Rule 6: Phosphates $\\text{PO}_{4}^{3-}$ are generally insoluble.' }
+        ];
+
+        let currentCompound = null;
+
+        // DOM elements
+        const compoundDisplay = document.getElementById('compound-formula');
+        const feedbackDisplay = document.getElementById('feedback');
+        const scoreDisplay = document.getElementById('current-score');
+        const highScoreDisplay = document.getElementById('high-score');
+        const solubleBtn = document.getElementById('btn-soluble');
+        const insolubleBtn = document.getElementById('btn-insoluble');
+        const loadingIndicator = document.getElementById('loading');
+        const authInfo = document.getElementById('auth-info');
+
+        // Function to render chemical formulas using LaTeX/MathJax
+        function renderFormula(formula) {
+            // 1. Wrap chemical symbols (e.g., Na, Cl, Pb, NO, Mg) in \text{} to ensure they are upright, not italicized.
+            let latexFormula = formula.replace(/([A-Z][a-z]?)/g, '\\text{$1}');
+            
+            // 2. Replace C-style underscores with LaTeX underscores for subscripts using curly braces.
+            // This is applied *after* wrapping symbols, ensuring it operates on the math environment.
+            latexFormula = latexFormula.replace(/_(\w+)/g, '_{$1}');
+
+            // 3. Render the entire string in the math environment ($$...$$), which correctly interprets () and _{}
+            compoundDisplay.innerHTML = `$$${latexFormula}$$`; 
+            
+            // Trigger MathJax rendering
+            if (window.MathJax) {
+                window.MathJax.typeset([compoundDisplay]);
+            }
+        }
+
+        // Function to render feedback.
+        function renderFeedback(text) {
+            feedbackDisplay.innerHTML = text;
+            if (window.MathJax) {
+                window.MathJax.typeset([feedbackDisplay]);
+            }
+        }
+
+        // --- Firebase/Auth Setup ---
+
+        async function initializeFirebase() {
+            try {
+                if (Object.keys(firebaseConfig).length === 0) {
+                    console.error("Firebase config is empty. Cannot initialize Firestore.");
+                    loadingIndicator.textContent = "Error: Firebase configuration missing.";
+                    return;
+                }
+                app = initializeApp(firebaseConfig);
+                db = getFirestore(app);
+                auth = getAuth(app);
+                
+                // Sign in logic
+                await new Promise(resolve => {
+                    if (initialAuthToken) {
+                        signInWithCustomToken(auth, initialAuthToken)
+                            .catch(error => {
+                                console.error("Custom token sign-in failed:", error);
+                                signInAnonymously(auth); // Fallback to anonymous
+                            })
+                            .finally(() => resolve());
+                    } else {
+                        signInAnonymously(auth).finally(() => resolve());
+                    }
+                });
+
+                onAuthStateChanged(auth, (user) => {
+                    if (user) {
+                        userId = user.uid;
+                        authInfo.textContent = `User ID: ${userId}`;
+                        isAuthReady = true;
+                        console.log("Auth State Changed. User ID:", userId);
+                        setupScoreListener();
+                        newQuestion();
+                        loadingIndicator.classList.add('hidden');
+                    } else {
+                        console.log("No user signed in.");
+                        isAuthReady = true; // Still ready, just anonymous
+                        loadingIndicator.classList.add('hidden');
+                        newQuestion();
+                    }
+                });
+
+            } catch (error) {
+                console.error("Firebase initialization failed:", error);
+                loadingIndicator.textContent = `Initialization Error: ${error.message}`;
+            }
+        }
+        
+        // Firestore path for high score
+        function getHighScoreDocRef() {
+             return doc(db, 'artifacts', appId, 'users', userId, 'solubility_quiz_scores', 'high_score');
+        }
+
+        function setupScoreListener() {
+            if (!isAuthReady || !userId) return;
+
+            const docRef = getHighScoreDocRef();
+
+            onSnapshot(docRef, (docSnap) => {
+                if (docSnap.exists()) {
+                    const data = docSnap.data();
+                    highScore = data.score || 0;
+                } else {
+                    highScore = 0;
+                }
+                highScoreDisplay.textContent = highScore;
+                console.log("High Score updated:", highScore);
+            }, (error) => {
+                console.error("Error setting up score listener:", error);
+            });
+        }
+
+        async function updateHighScore() {
+            if (!isAuthReady || !userId) return;
+
+            if (userScore > highScore) {
+                highScore = userScore;
+                highScoreDisplay.textContent = highScore;
+                const docRef = getHighScoreDocRef();
+                try {
+                    await setDoc(docRef, {
+                        score: highScore,
+                        timestamp: new Date()
+                    }, { merge: true });
+                    console.log("High score updated in Firestore:", highScore);
+                } catch (e) {
+                    console.error("Error writing high score:", e);
+                }
+            }
+        }
+
+        // --- Quiz Logic ---
+
+        function newQuestion() {
+            // Get a random compound
+            const randomIndex = Math.floor(Math.random() * compounds.length);
+            currentCompound = compounds[randomIndex];
+
+            // Render the question
+            renderFormula(currentCompound.formula);
+            renderFeedback("$$\\text{Select Soluble or Insoluble}$$"); // Updated prompt for clarity
+
+            // Enable buttons
+            solubleBtn.disabled = false;
+            insolubleBtn.disabled = false;
+            solubleBtn.classList.remove('bg-gray-400');
+            insolubleBtn.classList.remove('bg-gray-400');
+            solubleBtn.classList.add('hover:bg-indigo-600');
+            insolubleBtn.classList.add('hover:bg-indigo-600');
+        }
+
+        function handleAnswer(isSolubleGuess) {
+            // Disable buttons to prevent double clicking
+            solubleBtn.disabled = true;
+            insolubleBtn.disabled = true;
+            solubleBtn.classList.add('bg-gray-400');
+            insolubleBtn.classList.add('bg-gray-400');
+            solubleBtn.classList.remove('hover:bg-indigo-600');
+            insolubleBtn.classList.remove('hover:bg-indigo-600');
+
+            const isCorrect = isSolubleGuess === currentCompound.soluble;
+            const solubleStatus = currentCompound.soluble ? "Soluble" : "Insoluble";
+            const ruleText = currentCompound.rule;
+
+            if (isCorrect) {
+                userScore += 1;
+                scoreDisplay.textContent = userScore;
+                // Use HTML structure for better readability and style, keeping MathJax checkmark
+                const correctFeedback = `
+                    <div class="flex flex-col items-center">
+                        <div class="text-xl font-semibold text-green-600">
+                            $$\\checkmark \\text{ Correct! The compound is } \\text{${solubleStatus}}.$$
+                        </div>
+                        <div class="text-base text-gray-700 mt-1">
+                            Good job!
+                        </div>
+                    </div>`;
+                renderFeedback(correctFeedback);
+                updateHighScore();
+            } else {
+                // Use HTML structure and style for the main message, removing display math mode.
+                // Rule reference uses inline math ($...$) to correctly display ions.
+                const incorrectFeedback = `
+                    <div class="flex flex-col items-center text-center">
+                        <div class="text-xl font-semibold text-red-600 mb-2">
+                            <span class="mr-2">❌</span>Incorrect. The compound is ${solubleStatus}.
+                        </div>
+                        <div class="text-base text-gray-700">
+                            Rule Reference: ${ruleText}
+                        </div>
+                    </div>`;
+                renderFeedback(incorrectFeedback);
+                // Reset score and update high score
+                userScore = 0;
+                scoreDisplay.textContent = userScore;
+            }
+
+            // Wait a moment then ask a new question
+            setTimeout(newQuestion, 4000);
+        }
+
+        // --- Event Listeners and Initialization ---
+
+        solubleBtn.addEventListener('click', () => handleAnswer(true));
+        insolubleBtn.addEventListener('click', () => handleAnswer(false));
+
+        // Load MathJax configuration
+        window.MathJax = {
+            tex: {
+                inlineMath: [['$', '$'], ['\\(', '\\)']],
+                displayMath: [['$$', '$$'], ['\\[', '\\]']],
+                processEscapes: true,
+                tags: 'ams'
+            },
+            options: {
+                ignoreHtmlClass: 'tex2jax_ignore',
+                processHtmlClass: 'tex2jax_process'
+            }
+        };
+
+        // Load MathJax library and initialize Firebase after MathJax is loaded
+        const script = document.createElement('script');
+        script.src = 'https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js';
+        script.async = true;
+        script.onload = initializeFirebase; // Initialize Firebase only after MathJax is ready
+        document.head.appendChild(script);
+
+        // Ensure buttons are accessible even if MathJax fails to load immediately
+        document.addEventListener('DOMContentLoaded', () => {
+            // Display initial scores (will be updated by Firestore listener)
+            scoreDisplay.textContent = userScore;
+            highScoreDisplay.textContent = highScore;
+        });
+
+    </script>
+</head>
+<body class="p-4 md:p-8 min-h-screen flex items-center justify-center">
+
+    <div class="w-full max-w-xl bg-white shadow-2xl rounded-xl p-8 space-y-8 transform transition duration-500 hover:shadow-3xl">
+
+        <h1 class="text-4xl font-extrabold text-center text-indigo-700 border-b-4 border-indigo-200 pb-3">
+            Solubility Challenge
+        </h1>
+
+        <!-- Scoreboard -->
+        <div class="flex justify-around items-center text-center p-3 bg-gray-100 rounded-lg shadow-inner text-lg font-semibold">
+            <div>
+                <span class="text-gray-600 block">Score:</span>
+                <span id="current-score" class="text-3xl text-green-600">0</span>
+            </div>
+            <div>
+                <span class="text-gray-600 block">High Score:</span>
+                <span id="high-score" class="text-3xl text-orange-600">0</span>
+            </div>
+        </div>
+        
+        <!-- Loading Indicator / User ID -->
+        <div id="loading" class="text-center p-4 text-indigo-500 font-medium">
+            Loading app and connecting to database...
+        </div>
+        <div id="auth-info" class="text-xs text-gray-400 text-center truncate"></div>
+
+
+        <!-- Question Area (Simplified - removed redundant question text) -->
+        <div class="text-center p-8 bg-indigo-50 rounded-xl shadow-inner">
+            <!-- Removed: Is this compound Soluble or Insoluble in water? -->
+            <div id="compound-formula" class="compound-display flex justify-center items-center h-20">
+                <!-- Formula is rendered here by JavaScript/MathJax -->
+            </div>
+        </div>
+
+        <!-- Feedback Area -->
+        <div class="text-center p-4 min-h-20 flex items-center justify-center border-2 border-dashed border-gray-300 rounded-lg">
+            <p id="feedback" class="text-lg text-gray-800">
+                <!-- Feedback and rule reference appear here -->
+            </p>
+        </div>
+
+        <!-- Answer Buttons -->
+        <div class="flex justify-between space-x-4">
+            <button id="btn-soluble"
+                    class="flex-1 px-6 py-4 bg-indigo-500 text-white font-bold text-xl rounded-lg shadow-md transition duration-300 hover:bg-indigo-600 focus:outline-none focus:ring-4 focus:ring-indigo-300 disabled:opacity-50"
+                    disabled>
+                Soluble
+            </button>
+            <button id="btn-insoluble"
+                    class="flex-1 px-6 py-4 bg-indigo-500 text-white font-bold text-xl rounded-lg shadow-md transition duration-300 hover:bg-indigo-600 focus:outline-none focus:ring-4 focus:ring-indigo-300 disabled:opacity-50"
+                    disabled>
+                Insoluble
+            </button>
+        </div>
+
+    </div>
+
+</body>
+</html>

@@ -26,8 +26,21 @@
         setLogLevel('Debug');
 
         // --- GLOBAL FIREBASE VARIABLES (MANDATORY) ---
+        // ADDED FALLBACK CONFIGURATION FOR NON-CANVAS ENVIRONMENTS (LIKE GITHUB PAGES)
+        const defaultFirebaseConfig = { 
+            apiKey: "AIzaSy_DEFAULT_API_KEY", 
+            authDomain: "default-app.firebaseapp.com",
+            projectId: "default-project",
+            storageBucket: "default-app.appspot.com",
+            messagingSenderId: "123456789012",
+            appId: "1:123456789012:web:abcdef0123456789"
+        };
+
         const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-solubility-app-id';
-        const firebaseConfig = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}');
+        // Check if config exists, otherwise use the default placeholder configuration
+        const firebaseConfig = typeof __firebase_config !== 'undefined' 
+            ? JSON.parse(__firebase_config) 
+            : defaultFirebaseConfig;
         const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
         // --- END GLOBAL FIREBASE VARIABLES ---
 
@@ -36,6 +49,7 @@
         let userScore = 0;
         let highScore = 0;
         let isAuthReady = false;
+        let isFirestoreAvailable = false; // New flag to track if Firestore is usable
 
         // Quiz Data Structure (Now 39 compounds)
         const compounds = [
@@ -73,7 +87,6 @@
             
             // Rule 4 (Sulfate: SO4(2-) Exceptions)
             { formula: 'FeSO_4', soluble: true, rule: 'Rule 4: Sulfates $\\text{SO}_{4}^{2-}$ are generally soluble.' },
-            // Removed: { formula: 'CaSO_4', soluble: false, rule: 'Rule 4 Exception: Sulfates are insoluble with $\\text{Ca}^{2+}$, $\\text{Sr}^{2+}$, and $\\text{Ba}^{2+}$.' },
             { formula: 'SrSO_4', soluble: false, rule: 'Rule 4 Exception: Sulfates are insoluble with $\\text{Sr}^{2+}$.' },
             { formula: 'Al_2(SO_4)_3', soluble: true, rule: 'Rule 4: Sulfates $\\text{SO}_{4}^{2-}$ are generally soluble.' },
             { formula: 'CuSO_4', soluble: true, rule: 'Rule 4: Sulfates $\\text{SO}_{4}^{2-}$ are generally soluble.' },
@@ -140,14 +153,21 @@
 
         async function initializeFirebase() {
             try {
-                if (Object.keys(firebaseConfig).length === 0) {
-                    console.error("Firebase config is empty. Cannot initialize Firestore.");
-                    loadingIndicator.textContent = "Error: Firebase configuration missing.";
-                    return;
+                // Check if the config is the default placeholder or actually missing required keys
+                if (firebaseConfig.apiKey === defaultFirebaseConfig.apiKey) {
+                    console.warn("Using placeholder Firebase configuration. Firestore (High Score) persistence will be disabled.");
+                    loadingIndicator.textContent = "Database Disabled. App running in offline mode (High Score will not be saved).";
+                    isFirestoreAvailable = false;
+                    isAuthReady = true;
+                    newQuestion();
+                    return; // Skip database initialization
                 }
+
+                // If a non-placeholder config exists, proceed with initialization
                 app = initializeApp(firebaseConfig);
                 db = getFirestore(app);
                 auth = getAuth(app);
+                isFirestoreAvailable = true;
                 
                 // Sign in logic
                 await new Promise(resolve => {
@@ -182,7 +202,10 @@
 
             } catch (error) {
                 console.error("Firebase initialization failed:", error);
-                loadingIndicator.textContent = `Initialization Error: ${error.message}`;
+                loadingIndicator.textContent = `Initialization Error: ${error.message}. Database disabled.`;
+                isFirestoreAvailable = false;
+                isAuthReady = true;
+                newQuestion();
             }
         }
         
@@ -192,7 +215,7 @@
         }
 
         function setupScoreListener() {
-            if (!isAuthReady || !userId) return;
+            if (!isAuthReady || !userId || !isFirestoreAvailable) return;
 
             const docRef = getHighScoreDocRef();
 
@@ -211,7 +234,14 @@
         }
 
         async function updateHighScore() {
-            if (!isAuthReady || !userId) return;
+            if (!isAuthReady || !userId || !isFirestoreAvailable) {
+                // If Firestore is not available, local high score tracking is maintained but not persisted
+                if (userScore > highScore) {
+                    highScore = userScore;
+                    highScoreDisplay.textContent = highScore;
+                }
+                return;
+            }
 
             if (userScore > highScore) {
                 highScore = userScore;
@@ -276,7 +306,7 @@
                         </div>
                     </div>`;
                 renderFeedback(correctFeedback);
-                updateHighScore();
+                updateHighScore(); // Check and update score (persisted only if Firestore available)
             } else {
                 // Use HTML structure and style for the main message, removing display math mode.
                 // Rule reference uses inline math ($...$) to correctly display ions.
@@ -290,9 +320,10 @@
                         </div>
                     </div>`;
                 renderFeedback(incorrectFeedback);
-                // Reset score and update high score
+                // Reset score and update high score (persisted only if Firestore available)
                 userScore = 0;
                 scoreDisplay.textContent = userScore;
+                updateHighScore(); 
             }
 
             // Wait a moment then ask a new question
